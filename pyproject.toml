@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-multimedia-server"
+version = "2.0.0"
+description = "MCP Multimedia Server - cloud image/video/audio analysis for LLM agents via OpenAI-compatible multimodal models (video_url + input_audio STT)."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "ThermalEng" }]
+dependencies = [
+    "mcp>=1,<2",
+    "httpx",
+    "Pillow",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+sse = ["starlette", "uvicorn"]
+
+[project.scripts]
+mcp-multimedia-server = "mcp_multimedia_server.server:run"
+
+[tool.setuptools.packages.find]
+include = ["mcp_multimedia_server*"]
