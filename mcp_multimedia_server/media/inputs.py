@@ -19,8 +19,6 @@ from io import BytesIO
 from typing import Optional
 from urllib.parse import unquote, urlparse
 
-import httpx
-
 from .. import config
 from . import image_proc
 from . import video_proc
@@ -140,14 +138,6 @@ def decode_base64(src: str) -> bytes:
         raise InputError(f"invalid base64 data: {e}")
 
 
-async def fetch_bytes(url: str, *, timeout: float = 30.0) -> bytes:
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        resp = await client.get(url)
-    if resp.status_code != 200:
-        raise InputError(f"failed to fetch {url}: HTTP {resp.status_code}")
-    return resp.content
-
-
 def _data_uri(mime: str, data: bytes) -> str:
     return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
@@ -256,8 +246,7 @@ async def resolve_audio(src: str, *, max_size: int, formats: set[str] | None = N
     """Return (value, format) for ``input_audio``.
 
     http(s) URL -> (url, None): 按官方文档直放 data 字段(注意:opencode 网关收不到 URL 音频)。
-    Local / base64 -> (bare_b64, fmt): 走 OpenAI 标准 ``data`` + ``format``(opencode 网关只认这种,
-    data-URI 形式网关 audio_tokens=0,官方 API 才认)。
+    Local / base64 -> (bare_b64, fmt): 走 OpenAI 标准 ``data`` + ``format``。
 
     ``formats`` optionally restricts allowed formats (e.g. ASR: wav/mp3 only).
     """
