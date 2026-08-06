@@ -48,6 +48,8 @@ class OpenAICompatProvider(BaseVisionProvider):
         *,
         max_tokens=None,
         temperature=None,
+        model=None,
+        extra: dict | None = None,
     ) -> VisionResult:
         if not self.is_available():
             raise ProviderError(
@@ -56,7 +58,7 @@ class OpenAICompatProvider(BaseVisionProvider):
             )
 
         payload = {
-            "model": self._model,
+            "model": model or self._model,
             "messages": [{"role": "user", "content": parts}],
             "max_tokens": int(max_tokens if max_tokens is not None else self._default_max_tokens),
             "temperature": float(
@@ -66,6 +68,8 @@ class OpenAICompatProvider(BaseVisionProvider):
         }
         if self._reasoning_effort:
             payload["reasoning_effort"] = self._reasoning_effort
+        if extra:
+            payload.update(extra)
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",

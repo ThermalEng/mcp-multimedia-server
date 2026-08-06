@@ -1,1 +1,1 @@
-"""Media input handling and lightweight image metadata (no local video processing)."""
+"""Media input handling: image compression (Pillow), video re-encode (ffmpeg), audio/format checks."""

@@ -1,16 +1,14 @@
 """Unified media input handling.
 
-Accepts four input forms for images and videos:
-  1. absolute local path        /path/to/img.jpg
-  2. file:// URL                 file:///path/to/img.jpg
-  3. http(s):// URL              https://example.com/img.jpg
-  4. data URI / bare base64      data:image/png;base64,iVBOR...  (or the raw base64)
+Input forms: local path / file:// URL / http(s) URL / base64 data URI.
 
-Everything is resolved to a form suitable for an OpenAI-compatible multimodal model:
-images become ``image_url``, videos ``video_url``, and pure audio (see classify_media)
-becomes inline base64 for the ``input_audio`` part. http(s) image/video URLs pass
-through (the model fetches them); local files / base64 become base64 data URIs.
-No local media processing.
+Resolution rules (per official MiMo docs):
+- image: URL passes through (cloud scales); local/base64 is format-checked, hard-capped
+  to 8MP and (by default) compressed for OCR/token savings, then sent as a data URI.
+- video: URL passes through; local files are re-encoded via ffmpeg to target
+  resolution + fps, then sent as an mp4 data URI (≤50MB).
+- audio: URL is passed through directly in ``input_audio.data`` (per docs);
+  local/base64 becomes a ``data:{mime};base64,`` URI.
 """
 
 import base64
@@ -23,76 +21,44 @@ from urllib.parse import unquote, urlparse
 
 import httpx
 
-_DEFAULT_MAX_SIZE = 20 * 1024 * 1024
-_DEFAULT_MAX_VIDEO_SIZE = 100 * 1024 * 1024
-_DEFAULT_ALLOWED = "jpeg,png,webp,gif,bmp,tiff"
-_DATA_URI_RE = re.compile(r"^data:(?P<mime>[\w./+-]+)?;base64,(?P<data>.+)$", re.DOTALL)
-_VIDEO_EXT_MIME = {
-    ".mp4": "video/mp4",
-    ".mov": "video/quicktime",
-    ".avi": "video/x-msvideo",
-    ".mkv": "video/x-matroska",
-    ".webm": "video/webm",
-    ".flv": "video/x-flv",
-    ".wmv": "video/x-ms-wmv",
-}
-_AUDIO_EXT_MIME = {
-    ".mp3": "mp3",
-    ".wav": "wav",
-    ".ogg": "ogg",
-    ".oga": "ogg",
-    ".opus": "opus",
-    ".flac": "flac",
-    ".m4a": "m4a",
-    ".aac": "aac",
-}
-_AUDIO_MIME_FORMAT = {
-    "audio/mpeg": "mp3",
-    "audio/x-wav": "wav",
-    "audio/wav": "wav",
-    "audio/wave": "wav",
-    "audio/ogg": "ogg",
-    "audio/opus": "opus",
-    "audio/flac": "flac",
-    "audio/mp4": "m4a",
-    "audio/x-m4a": "m4a",
-    "audio/aac": "aac",
-}
+from .. import config
+from . import image_proc
+from . import video_proc
 
 
 class InputError(Exception):
     """Raised when an image/video input cannot be read or fails validation."""
 
 
+_DATA_URI_RE = re.compile(r"^data:(?P<mime>[\w./+-]+)?;base64,(?P<data>.+)$", re.DOTALL)
+
+# 白名单(官方文档) -> MIME
+_VIDEO_EXT_MIME = {
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".avi": "video/x-msvideo",
+    ".wmv": "video/x-ms-wmv",
+}
+
+
+# --- 兼容旧引用:返回硬编码 config 值 ---
 def _max_size() -> int:
-    try:
-        return int(os.getenv("MCP_MEDIA_MAX_IMAGE_SIZE", str(_DEFAULT_MAX_SIZE)))
-    except ValueError:
-        return _DEFAULT_MAX_SIZE
+    return config.MAX_IMAGE_SIZE
 
 
 def _max_video_size() -> int:
-    try:
-        return int(os.getenv("MCP_MEDIA_MAX_VIDEO_SIZE", str(_DEFAULT_MAX_VIDEO_SIZE)))
-    except ValueError:
-        return _DEFAULT_MAX_VIDEO_SIZE
-
-
-_DEFAULT_MAX_AUDIO_SIZE = 20 * 1024 * 1024
+    return config.MAX_VIDEO_SIZE
 
 
 def _max_audio_size() -> int:
-    try:
-        return int(os.getenv("MCP_MEDIA_MAX_AUDIO_SIZE", str(_DEFAULT_MAX_AUDIO_SIZE)))
-    except ValueError:
-        return _DEFAULT_MAX_AUDIO_SIZE
+    return config.MAX_AUDIO_SIZE
 
 
 def _allowed_formats() -> set[str]:
-    raw = os.getenv("MCP_MEDIA_ALLOWED_IMAGE_FORMATS", _DEFAULT_ALLOWED)
-    return {f.strip().lower() for f in raw.split(",") if f.strip()}
+    return set(config.IMAGE_FORMATS)
 
 
+# --- 基础工具 ---
 def is_http_url(src: str) -> bool:
     return src.startswith("http://") or src.startswith("https://")
 
@@ -138,9 +104,8 @@ def local_path(src: str) -> str:
 
 
 def check_size(data: bytes) -> None:
-    limit = _max_size()
-    if len(data) > limit:
-        raise InputError(f"input exceeds MCP_MEDIA_MAX_IMAGE_SIZE ({len(data)} > {limit} bytes)")
+    if len(data) > config.MAX_IMAGE_SIZE:
+        raise InputError(f"image exceeds {config.MAX_IMAGE_SIZE} bytes")
 
 
 def sniff_image_format(data: bytes) -> str:
@@ -160,9 +125,8 @@ def sniff_image_format(data: bytes) -> str:
 
 
 def check_allowed_format(fmt: str) -> None:
-    allowed = _allowed_formats()
-    if fmt not in allowed:
-        raise InputError(f"image format '{fmt}' not allowed (allowed: {sorted(allowed)})")
+    if fmt not in config.IMAGE_FORMATS:
+        raise InputError(f"image format '{fmt}' not allowed (allowed: {sorted(config.IMAGE_FORMATS)})")
 
 
 def decode_base64(src: str) -> bytes:
@@ -184,17 +148,14 @@ async def fetch_bytes(url: str, *, timeout: float = 30.0) -> bytes:
     return resp.content
 
 
-def to_data_uri(data: bytes, fmt: str) -> str:
-    b64 = base64.b64encode(data).decode("ascii")
-    return f"data:image/{fmt};base64,{b64}"
+def _data_uri(mime: str, data: bytes) -> str:
+    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
 
 async def load_image_bytes(src: str) -> tuple[bytes, str]:
-    """Load an image input into (bytes, format), validating size and format."""
+    """Load a non-URL image input into (bytes, format), validating size and format."""
     src = src.strip()
-    if is_http_url(src):
-        data = await fetch_bytes(src)
-    elif is_data_uri(src):
+    if is_data_uri(src):
         data = decode_base64(src)
     else:
         path = existing_path(src)
@@ -211,92 +172,115 @@ async def load_image_bytes(src: str) -> tuple[bytes, str]:
     return data, fmt
 
 
-async def resolve_image_url(src: str) -> str:
-    """Return a value suitable for a VLM ``image_url.url`` field.
+# --- 图片 ---
+async def resolve_image_url(src: str, *, compress: bool | None = None) -> str:
+    """Return value for ``image_url.url``.
 
-    http(s) URLs pass through (the model fetches them); everything else is
-    validated locally and converted to a base64 data URI.
+    http(s) URL passes through (cloud fetches + scales); local/base64 is capped to
+    8MP and (default) compressed, then returned as a data URI.
     """
     src = src.strip()
     if is_http_url(src):
         return src
+    if compress is None:
+        compress = config.IMAGE_COMPRESS
     data, fmt = await load_image_bytes(src)
-    return to_data_uri(data, fmt)
+    if compress:
+        data2, fmt2 = image_proc.process_image(data)
+        return _data_uri(f"image/{fmt2}", data2)
+    # 不压缩:仅 8MP 硬上限
+    data2, fmt2 = image_proc.process_image_without_compress(data)
+    return _data_uri(f"image/{fmt2}", data2)
 
 
-async def resolve_video_url(src: str) -> str:
-    """Return a value suitable for a DashScope ``video_url.url`` field.
+# --- 视频 ---
+async def resolve_video(src: str, *, fps: float | None = None,
+                        media_resolution: str | None = None) -> dict:
+    """Return the ``video_url`` object.
 
-    http(s) URLs and data URIs pass through; local files / bare base64 become a
-    ``data:video/<type>;base64,...`` URI. The cloud model does frame sampling.
+    URL -> pass through (optionally with fps / media_resolution per docs).
+    Local -> re-encode via ffmpeg (resolution + fps), return mp4 data URI.
     """
     src = src.strip()
-    if is_http_url(src) or is_data_uri(src):
-        return src
+    if is_http_url(src):
+        obj = {"url": src}
+        if fps is not None:
+            obj["fps"] = fps
+        if media_resolution:
+            obj["media_resolution"] = media_resolution
+        return obj
+    if is_data_uri(src):
+        return {"url": src}
 
     path = existing_path(src)
     if path:
-        size = os.path.getsize(path)
-        limit = _max_video_size()
-        if size > limit:
+        ext = os.path.splitext(path.lower())[1]
+        if ext not in _VIDEO_EXT_MIME:
             raise InputError(
-                f"video exceeds MCP_MEDIA_MAX_VIDEO_SIZE ({size} > {limit} bytes); "
-                "pass an http(s) URL instead of a local file for large videos"
+                f"video format '{ext.lstrip('.')}' not allowed (allowed: {sorted(config.VIDEO_FORMATS)})"
             )
-        ext = os.path.splitext(path)[1].lower()
-        mime = _VIDEO_EXT_MIME.get(ext, "video/mp4")
-        with open(path, "rb") as f:
-            data = f.read()
-        b64 = base64.b64encode(data).decode("ascii")
-        return f"data:{mime};base64,{b64}"
+        out = video_proc.reencode_video(path, fps=fps)
+        try:
+            with open(out, "rb") as f:
+                data = f.read()
+        finally:
+            try:
+                os.unlink(out)
+            except OSError:
+                pass
+        if len(data) > config.MAX_VIDEO_SIZE:
+            raise InputError(
+                f"re-encoded video exceeds {config.MAX_VIDEO_SIZE} bytes; "
+                "reduce duration/resolution or pass an http(s) URL"
+            )
+        return {"url": _data_uri("video/mp4", data)}
 
     if looks_like_base64(src):
-        return f"data:video/mp4;base64,{src}"
+        return {"url": f"data:video/mp4;base64,{src}"}
 
     raise InputError(f"file not found: {_normalize_path(src)}")
 
 
-def classify_media(src: str) -> str:
-    """Classify an input as 'audio' or 'video' by data-URI mime / file extension."""
-    src = src.strip()
-    if is_data_uri(src):
-        return "audio" if re.match(r"^data:audio/", src, re.IGNORECASE) else "video"
-    path = urlparse(src).path if is_http_url(src) else src
-    ext = os.path.splitext(path.lower())[1]
-    return "audio" if ext in _AUDIO_EXT_MIME else "video"
+# --- 音频 ---
+_AUDIO_FMT_MIME = {
+    "mp3": "audio/mpeg",
+    "wav": "audio/wav",
+    "flac": "audio/flac",
+    "m4a": "audio/mp4",
+    "ogg": "audio/ogg",
+}
+_AUDIO_MIME_FMT = {mime: fmt for fmt, mime in _AUDIO_FMT_MIME.items()}
 
 
-def audio_format(src: str) -> str:
-    """Return the cloud ``input_audio.format`` token (wav/mp3/...) for an audio input."""
-    src = src.strip()
-    if is_data_uri(src):
-        m = re.match(r"^data:(audio/[\w.+-]+)", src, re.IGNORECASE)
-        if m:
-            return _AUDIO_MIME_FORMAT.get(m.group(1).lower(), "mp3")
-    path = urlparse(src).path if is_http_url(src) else src
-    ext = os.path.splitext(path.lower())[1]
-    return _AUDIO_EXT_MIME.get(ext, "mp3")
+async def resolve_audio(src: str, *, max_size: int, formats: set[str] | None = None) -> tuple[str, str | None]:
+    """Return (value, format) for ``input_audio``.
 
+    http(s) URL -> (url, None): 按官方文档直放 data 字段(注意:opencode 网关收不到 URL 音频)。
+    Local / base64 -> (bare_b64, fmt): 走 OpenAI 标准 ``data`` + ``format``(opencode 网关只认这种,
+    data-URI 形式网关 audio_tokens=0,官方 API 才认)。
 
-async def resolve_audio(src: str) -> tuple[str, str]:
-    """Return (base64_data, format) for an audio input.
-
-    The cloud ``input_audio`` part requires inline base64 data (not a URL), so
-    remote http(s) audio is downloaded here instead of passed through.
+    ``formats`` optionally restricts allowed formats (e.g. ASR: wav/mp3 only).
     """
     src = src.strip()
     if is_http_url(src):
-        data = await fetch_bytes(src)
-    elif is_data_uri(src):
+        return src, None
+    if is_data_uri(src):
         data = decode_base64(src)
+        m = re.match(r"^data:([\w./+-]+)", src, re.IGNORECASE)
+        fmt = _AUDIO_MIME_FMT.get((m.group(1) if m else "").lower())
+        if not fmt:
+            raise InputError("could not determine audio format from data URI")
     else:
         path = existing_path(src)
         if not path:
             raise InputError(f"file not found: {_normalize_path(src)}")
+        fmt = os.path.splitext(path.lower())[1].lstrip(".")
         with open(path, "rb") as f:
             data = f.read()
-    limit = _max_audio_size()
-    if len(data) > limit:
-        raise InputError(f"audio exceeds MCP_MEDIA_MAX_AUDIO_SIZE ({len(data)} > {limit} bytes)")
-    b64 = base64.b64encode(data).decode("ascii")
-    return b64, audio_format(src)
+    if fmt not in config.AUDIO_FORMATS:
+        raise InputError(f"audio format '{fmt}' not allowed (allowed: {sorted(config.AUDIO_FORMATS)})")
+    if formats and fmt not in formats:
+        raise InputError(f"audio format '{fmt}' not allowed here (allowed: {sorted(formats)})")
+    if len(data) > max_size:
+        raise InputError(f"audio exceeds size limit ({len(data)} > {max_size} bytes)")
+    return base64.b64encode(data).decode("ascii"), fmt
