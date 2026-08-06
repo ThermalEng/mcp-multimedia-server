@@ -23,8 +23,6 @@ MCP(MCP = Model Context Protocol)stdio 服务器,注册进 agent 后即可当工
 | `image_metadata` | 本地路径 | 读取图片尺寸/格式/EXIF/GPS,不调用云端 |
 | `get_server_status` | — | 查看当前模型与各项限制/参数 |
 
-通用可选参数:`prompt`、`max_tokens`、`temperature`。
-
 ## 工作原理
 
 ```

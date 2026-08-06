@@ -77,7 +77,7 @@ _IMAGE_PROP = {
     "type": "string",
     "description": (
         "图片，支持：本地文件路径 / http(s) URL / base64(data URI)。"
-        f"单张最大 {_IMG_MAX_MB}MB，格式 jpeg/png/gif/webp/bmp。本地图片会自动压缩优化，更快更省、OCR 足够清晰"
+        f"单张最大 {_IMG_MAX_MB}MB，格式 jpeg/png/gif/webp/bmp"
     ),
 }
 _IMAGE_BATCH_PROP = {
@@ -97,6 +97,13 @@ _AUDIO_PROP = {
     "description": (
         "音频，支持：本地文件路径 / http(s) URL / base64(data URI)。"
         f"推荐用本地文件或 base64（URL 音频可能不被识别）。最大 {_AUD_MAX_MB}MB，格式 mp3/wav/flac/m4a/ogg"
+    ),
+}
+_ASR_AUDIO_PROP = {
+    "type": "string",
+    "description": (
+        "音频，支持：本地文件路径 / base64(data URI)。"
+        f"仅 wav/mp3，最大 {_ASR_MAX_MB}MB"
     ),
 }
 _LANGUAGE_PROP = {
@@ -184,11 +191,9 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "audio": _AUDIO_PROP,
+                    "audio": _ASR_AUDIO_PROP,
                     "language": _LANGUAGE_PROP,
-                    "prompt": {"type": "string", "description": "自由指令覆盖默认转写提示", "default": ""},
                     "max_tokens": {"type": "integer", "description": f"可选，本次生成上限（默认 {config.MAX_TOKENS}）"},
-                    "temperature": {"type": "number", "description": "可选，采样温度"},
                 },
                 "required": ["audio"],
             },
@@ -331,10 +336,13 @@ async def _analyze_asr(args: dict) -> str:
         aa["format"] = audio_fmt
     parts = [{"type": "input_audio", "input_audio": aa}]
     if not config.ASR_MODEL.endswith("-asr"):
-        # 官方 -asr:content 仅 input_audio + asr_options;v2.5 顶替时需补文本指令
-        parts.append({"type": "text", "text": args.get("prompt") or _asr_default_prompt(lang)})
+        # 官方 -asr:content 仅 input_audio + asr_options;v2.5 顶替时需内置文本指令
+        parts.append({"type": "text", "text": _asr_default_prompt(lang)})
     extra = {"asr_options": {"language": lang}}
-    result = await _cached_analyze(provider, parts, args, model=config.ASR_MODEL, extra=extra)
+    # 转写必须确定性:强制 temperature=0(忽略任何传入/默认值)
+    args2 = dict(args)
+    args2["temperature"] = 0.0
+    result = await _cached_analyze(provider, parts, args2, model=config.ASR_MODEL, extra=extra)
     out = result.to_dict()
     out["language"] = lang
     out["model"] = config.ASR_MODEL
