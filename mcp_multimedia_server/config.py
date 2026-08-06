@@ -12,8 +12,8 @@ API_KEY = os.getenv("MCP_MEDIA_API_KEY", "").strip()
 MODEL = os.getenv("MCP_MEDIA_MODEL", "mimo-v2.5").strip()
 
 # --- 输出 / 推理 ---
-MAX_TOKENS = 131072            # 单次输出上限(128K)。大文档OCR输出可能很大,65536可能截断;
-                               # 极端长输出可按次传更高(网关实测接受至100万);总约束 输入+输出≤1M上下文
+MAX_TOKENS = 128000            # 单次输出上限,对齐 opencode 注册表 maxTokens=128000(opencode-go/mimo-v2.5);
+                               # 大文档OCR输出可能很大,极端长输出可按次传更高;总约束 输入+输出≤1M上下文
 TEMPERATURE = 0.2
 TIMEOUT = 120.0
 MAX_RETRIES = 3
